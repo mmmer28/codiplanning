@@ -1,1 +1,5 @@
-from .custom_hooks import BestLatestPlanningCheckpointHook, TransferWeight
+from .custom_hooks import (
+    BestLatestPlanningCheckpointHook,
+    TrainableParamPrefixHook,
+    TransferWeight,
+)

@@ -18,6 +18,7 @@ from mmdet3d.core.bbox import LiDARInstance3DBoxes
 
 from os import path as osp
 from nuscenes.eval.common.utils import quaternion_yaw, Quaternion
+from scipy.linalg import polar
 from .eval_utils.nuscenes_eval import NuScenesEval_custom,TrackingEval_custom
 from nuscenes.eval.tracking.evaluate import TrackingEval
 from .eval_utils.nuscenes_eval_motion import MotionEval
@@ -196,18 +197,26 @@ class SPDE2EDataset(NuScenesDataset):
         with open(path, 'r') as f:
             return json.load(f)
 
+    @staticmethod
+    def _orthogonalize_rotation_matrix(rotation):
+        rot = np.array(rotation, dtype=np.float64)
+        for _ in range(100):
+            u, _ = polar(rot)
+            rot = u
+        return rot.astype(np.float32)
+
     def _get_lidar_ego_global_vehicle(self, veh_data_info, veh_root):
         calib_lidar2ego_path = osp.join(
             veh_root, veh_data_info['calib_lidar_to_novatel_path'])
         calib_lidar2ego = self._load_json(calib_lidar2ego_path)
-        l2e_r = Quaternion(
-            matrix=np.array(calib_lidar2ego['transform']['rotation'])).rotation_matrix
+        l2e_r = self._orthogonalize_rotation_matrix(
+            calib_lidar2ego['transform']['rotation'])
         l2e_t = np.array(calib_lidar2ego['transform']['translation'], dtype=np.float32)
 
         calib_ego2global_path = osp.join(
             veh_root, veh_data_info['calib_novatel_to_world_path'])
         calib_ego2global = self._load_json(calib_ego2global_path)
-        e2g_r = Quaternion(matrix=np.array(calib_ego2global['rotation'])).rotation_matrix
+        e2g_r = self._orthogonalize_rotation_matrix(calib_ego2global['rotation'])
         e2g_t = np.array(calib_ego2global['translation'], dtype=np.float32)
         return l2e_r, l2e_t, e2g_r, e2g_t
 
@@ -257,7 +266,7 @@ class SPDE2EDataset(NuScenesDataset):
                 veh_infos[veh_frame], veh_root)
             inf_calib = self._load_json(osp.join(
                 inf_root, inf_infos[inf_frame]['calib_virtuallidar_to_world_path']))
-            inf_e2g_r = Quaternion(matrix=np.array(inf_calib['rotation'])).rotation_matrix
+            inf_e2g_r = self._orthogonalize_rotation_matrix(inf_calib['rotation'])
             inf_e2g_t = np.array(inf_calib['translation'], dtype=np.float32)
             veh2inf_rt = self._compute_veh2inf_rt(
                 veh_l2e_r, veh_l2e_t, veh_e2g_r, veh_e2g_t,
