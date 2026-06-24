@@ -6,6 +6,8 @@
 #----------------------------------------------------------------#
 
 import copy
+import json
+import os
 import numpy as np
 import torch
 import mmcv
@@ -181,6 +183,102 @@ class SPDE2EDataset(NuScenesDataset):
         self.class_range=class_range
         self.new_range_100 = new_range_100
         self.other_agent_names = other_agent_names
+        self.inf_to_veh_token = {}
+        self.inf_to_veh2inf_rt = {}
+        self.veh_traj_api = None
+        if self.v2x_side == 'infrastructure_side' and self.planning_steps:
+            self._init_inf_ego_planning_gt()
+
+    def _spd_dataset_root(self):
+        return os.path.dirname(os.path.normpath(self.data_root))
+
+    def _load_json(self, path):
+        with open(path, 'r') as f:
+            return json.load(f)
+
+    def _get_lidar_ego_global_vehicle(self, veh_data_info, veh_root):
+        calib_lidar2ego_path = osp.join(
+            veh_root, veh_data_info['calib_lidar_to_novatel_path'])
+        calib_lidar2ego = self._load_json(calib_lidar2ego_path)
+        l2e_r = Quaternion(
+            matrix=np.array(calib_lidar2ego['transform']['rotation'])).rotation_matrix
+        l2e_t = np.array(calib_lidar2ego['transform']['translation'], dtype=np.float32)
+
+        calib_ego2global_path = osp.join(
+            veh_root, veh_data_info['calib_novatel_to_world_path'])
+        calib_ego2global = self._load_json(calib_ego2global_path)
+        e2g_r = Quaternion(matrix=np.array(calib_ego2global['rotation'])).rotation_matrix
+        e2g_t = np.array(calib_ego2global['translation'], dtype=np.float32)
+        return l2e_r, l2e_t, e2g_r, e2g_t
+
+    def _compute_veh2inf_rt(self, veh_l2e_r, veh_l2e_t, veh_e2g_r, veh_e2g_t,
+                            inf_e2g_r, inf_e2g_t, system_error_offset):
+        inf_l2e_r = np.eye(3, dtype=np.float32)
+        inf_l2e_t = np.zeros(3, dtype=np.float32)
+        err_offset = np.array([
+            system_error_offset['delta_x'],
+            system_error_offset['delta_y'],
+            0.0,
+        ], dtype=np.float32)
+        r = ((veh_l2e_r.T @ veh_e2g_r.T) @ (np.linalg.inv(inf_e2g_r).T @ np.linalg.inv(inf_l2e_r).T)).T
+        t = (-err_offset @ veh_l2e_r.T @ veh_e2g_r.T + veh_l2e_t @ veh_e2g_r.T + veh_e2g_t) @ (
+            np.linalg.inv(inf_e2g_r).T @ np.linalg.inv(inf_l2e_r).T)
+        t -= inf_e2g_t @ (np.linalg.inv(inf_e2g_r).T @ np.linalg.inv(inf_l2e_r).T) + \
+            inf_l2e_t @ (np.linalg.inv(inf_l2e_r).T)
+
+        veh2inf_rt = np.eye(4, dtype=np.float32)
+        veh2inf_rt[:3, :3] = r
+        veh2inf_rt[:3, 3] = t
+        return veh2inf_rt.T
+
+    def _init_inf_ego_planning_gt(self):
+        dataset_root = self._spd_dataset_root()
+        coop_json = osp.join(dataset_root, 'cooperative', 'data_info.json')
+        veh_json = osp.join(dataset_root, 'vehicle-side', 'data_info.json')
+        inf_json = osp.join(dataset_root, 'infrastructure-side', 'data_info.json')
+        if not (osp.isfile(coop_json) and osp.isfile(veh_json) and osp.isfile(inf_json)):
+            raise FileNotFoundError(
+                'Infrastructure planning requires cooperative + vehicle-side + '
+                'infrastructure-side data_info.json under {}'.format(dataset_root))
+
+        coop_infos = self._load_json(coop_json)
+        veh_infos = {item['frame_id']: item for item in self._load_json(veh_json)}
+        inf_infos = {item['frame_id']: item for item in self._load_json(inf_json)}
+        veh_root = osp.join(dataset_root, 'vehicle-side')
+        inf_root = osp.join(dataset_root, 'infrastructure-side')
+
+        for coop_info in coop_infos:
+            veh_frame = coop_info['vehicle_frame']
+            inf_frame = coop_info['infrastructure_frame']
+            if veh_frame not in veh_infos or inf_frame not in inf_infos:
+                continue
+
+            veh_l2e_r, veh_l2e_t, veh_e2g_r, veh_e2g_t = self._get_lidar_ego_global_vehicle(
+                veh_infos[veh_frame], veh_root)
+            inf_calib = self._load_json(osp.join(
+                inf_root, inf_infos[inf_frame]['calib_virtuallidar_to_world_path']))
+            inf_e2g_r = Quaternion(matrix=np.array(inf_calib['rotation'])).rotation_matrix
+            inf_e2g_t = np.array(inf_calib['translation'], dtype=np.float32)
+            veh2inf_rt = self._compute_veh2inf_rt(
+                veh_l2e_r, veh_l2e_t, veh_e2g_r, veh_e2g_t,
+                inf_e2g_r, inf_e2g_t, coop_info['system_error_offset'])
+
+            self.inf_to_veh_token[inf_frame] = veh_frame
+            self.inf_to_veh2inf_rt[inf_frame] = veh2inf_rt
+
+        veh_root_nusc = osp.join(dataset_root, 'vehicle-side')
+        veh_nusc = NuScenes(version=self.version, dataroot=veh_root_nusc, verbose=False)
+        self.veh_traj_api = SPDTraj(
+            veh_nusc,
+            self.predict_steps,
+            self.planning_steps,
+            self.past_steps,
+            self.fut_steps,
+            self.with_velocity,
+            self.CLASSES,
+            self.box_mode_3d,
+            self.use_nonlinear_optimizer,
+        )
 
     def __len__(self):
         if not self.is_debug:
@@ -453,8 +551,17 @@ class SPDE2EDataset(NuScenesDataset):
         gt_sdc_fut_traj, gt_sdc_fut_traj_mask = self.traj_api.get_sdc_traj_label(
             info['token'])
 
-        sdc_planning, sdc_planning_mask, command = self.traj_api.get_sdc_planning_label(
-            info['token'])
+        if self.v2x_side == 'infrastructure_side' and self.veh_traj_api is not None:
+            veh_token = self.inf_to_veh_token.get(info['token'])
+            veh2inf_rt = self.inf_to_veh2inf_rt.get(info['token'])
+            if veh_token is None or veh2inf_rt is None:
+                raise KeyError(
+                    'Missing cooperative mapping for infrastructure frame {}'.format(info['token']))
+            sdc_planning, sdc_planning_mask, command = self.traj_api.get_ego_planning_in_inf_lidar_frame(
+                veh_token, veh2inf_rt, self.veh_traj_api)
+        else:
+            sdc_planning, sdc_planning_mask, command = self.traj_api.get_sdc_planning_label(
+                info['token'])
 
         gt_labels_3d = []
         for cat in gt_names_3d:

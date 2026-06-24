@@ -289,3 +289,37 @@ class SPDTraj(object):
             command = 2 #'FORWARD'
         
         return planning_all, planning_mask_all, command
+
+    @staticmethod
+    def transform_planning_veh_to_inf(planning_all, planning_mask_all, veh2inf_rt):
+        """Transform ego planning GT from vehicle lidar frame to infrastructure lidar frame."""
+        veh2inf_rt = np.asarray(veh2inf_rt, dtype=np.float32)
+        if veh2inf_rt.shape == (4, 4):
+            rt = veh2inf_rt
+        else:
+            rt = np.eye(4, dtype=np.float32)
+            rt[:3, :3] = veh2inf_rt[:3, :3]
+            rt[:3, 3] = veh2inf_rt[:3, 3]
+
+        rot = rt[:3, :3]
+        out = np.zeros_like(planning_all)
+        out_mask = planning_mask_all.copy()
+        for step in range(planning_all.shape[1]):
+            if not planning_mask_all[0, step].any():
+                continue
+            x, y, yaw = planning_all[0, step]
+            point = np.array([x, y, 0.0, 1.0], dtype=np.float32)
+            point_inf = point @ rt
+            out[0, step, 0] = point_inf[0]
+            out[0, step, 1] = point_inf[1]
+            direction = np.array([np.cos(yaw), np.sin(yaw), 0.0], dtype=np.float32)
+            direction_inf = direction @ rot
+            out[0, step, 2] = np.arctan2(direction_inf[1], direction_inf[0])
+        return out, out_mask
+
+    def get_ego_planning_in_inf_lidar_frame(self, veh_sample_token, veh2inf_rt, veh_traj_api):
+        """Ego-vehicle planning GT expressed in the current infrastructure lidar frame."""
+        planning, planning_mask, command = veh_traj_api.get_sdc_planning_label(veh_sample_token)
+        planning, planning_mask = self.transform_planning_veh_to_inf(
+            planning, planning_mask, veh2inf_rt)
+        return planning, planning_mask, command
