@@ -30,6 +30,22 @@ def custom_train_detector(model,
                    meta=None):
     logger = get_root_logger(cfg.log_level)
 
+    trainable_param_prefixes = cfg.get('trainable_param_prefixes', None)
+    if trainable_param_prefixes is not None:
+        trainable_param_prefixes = tuple(trainable_param_prefixes)
+        trainable_numel = 0
+        trainable_names = []
+        for name, param in model.named_parameters():
+            is_trainable = name.startswith(trainable_param_prefixes)
+            param.requires_grad = is_trainable
+            if is_trainable:
+                trainable_numel += param.numel()
+                trainable_names.append(name)
+        logger.info(
+            'Trainable parameter prefixes: %s; trainable tensors: %d; '
+            'trainable params: %d',
+            trainable_param_prefixes, len(trainable_names), trainable_numel)
+
     # prepare data loaders
    
     dataset = dataset if isinstance(dataset, (list, tuple)) else [dataset]

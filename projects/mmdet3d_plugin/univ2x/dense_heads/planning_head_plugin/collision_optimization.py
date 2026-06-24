@@ -7,7 +7,6 @@
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
-import numpy.typing as npt
 from casadi import DM, Opti, OptiSol, cos, diff, sin, sumsqr, vertcat, exp
 
 Pose = Tuple[float, float, float]  # (x, y, yaw)
@@ -34,7 +33,8 @@ class CollisionNonlinearOptimizer:
         self.alpha_collision = alpha_collision
         self.obj_pixel_pos = obj_pixel_pos
         # Use a array of dts to make it compatible to situations with varying dts across different time steps.
-        self._dts: npt.NDArray[np.float32] = np.asarray([[dt] * trajectory_len])
+        # NumPy<1.20 has no numpy.typing; np.ndarray is enough here.
+        self._dts: np.ndarray = np.asarray([[dt] * trajectory_len])
         self._init_optimization()
 
     def _init_optimization(self) -> None:

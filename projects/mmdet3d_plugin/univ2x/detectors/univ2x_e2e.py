@@ -71,6 +71,11 @@ class UniV2X(UniV2XTrack):
         self.read_track_query_file_root = read_track_query_file_root
 
         self.is_ego_agent = is_ego_agent
+        self.prev_frame_info.update({
+            'planning_prev_l2g_t': None,
+            'planning_prev_timestamp': None,
+            'planning_prev_velocity': None,
+        })
 
 
     @property
@@ -107,6 +112,106 @@ class UniV2X(UniV2XTrack):
             return self.forward_train(**kwargs)
         else:
             return self.forward_test(**kwargs)
+
+    def _unwrap_first(self, value):
+        while isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                return None
+            value = value[0]
+        return value
+
+    def _first_batch_sequence(self, value):
+        value = self._unwrap_first(value)
+        if value is None:
+            return None
+        if torch.is_tensor(value) and value.dim() >= 4:
+            return value[0]
+        if torch.is_tensor(value) and value.dim() == 3 and value.shape[-2:] != (3, 3):
+            return value[0]
+        return value
+
+    def _current_frame_value(self, value):
+        value = self._first_batch_sequence(value)
+        if value is None or not torch.is_tensor(value):
+            return None
+        if value.dim() >= 3:
+            return value[-1]
+        if value.dim() == 2 and value.shape[-2:] != (3, 3):
+            return value[-1]
+        return value
+
+    def _velocity_to_current_lidar(self, vector_global, l2g_r_mat):
+        if l2g_r_mat is None:
+            return vector_global
+        if l2g_r_mat.dim() >= 3:
+            l2g_r_mat = l2g_r_mat[-1]
+        return vector_global @ torch.linalg.inv(l2g_r_mat).type_as(vector_global)
+
+    def _build_train_ego_status(self, l2g_t, l2g_r_mat, timestamp, device, dtype):
+        positions = self._first_batch_sequence(l2g_t)
+        rotations = self._first_batch_sequence(l2g_r_mat)
+        timestamps = self._first_batch_sequence(timestamp)
+        status = torch.zeros(1, 4, device=device, dtype=dtype)
+        if positions is None or timestamps is None:
+            return status
+
+        positions = positions.to(device=device, dtype=dtype)
+        timestamps = timestamps.to(device=device, dtype=dtype).reshape(-1)
+        if positions.shape[0] < 2 or timestamps.numel() < 2:
+            return status
+
+        rotations = rotations.to(device=device, dtype=dtype) if torch.is_tensor(rotations) else None
+        dt = torch.clamp(timestamps[-1] - timestamps[-2], min=1e-3)
+        velocity_global = (positions[-1] - positions[-2]) / dt
+        velocity = self._velocity_to_current_lidar(velocity_global, rotations)
+
+        acceleration = torch.zeros_like(velocity)
+        if positions.shape[0] >= 3 and timestamps.numel() >= 3:
+            prev_dt = torch.clamp(timestamps[-2] - timestamps[-3], min=1e-3)
+            prev_velocity_global = (positions[-2] - positions[-3]) / prev_dt
+            acceleration_global = (velocity_global - prev_velocity_global) / dt
+            acceleration = self._velocity_to_current_lidar(acceleration_global, rotations)
+
+        status[0, :2] = velocity[:2]
+        status[0, 2:] = acceleration[:2]
+        return status
+
+    def _build_test_ego_status(self, l2g_t, l2g_r_mat, timestamp, is_new_scene, device, dtype):
+        cur_pos = self._current_frame_value(l2g_t)
+        cur_rot = self._current_frame_value(l2g_r_mat)
+        cur_timestamp = self._current_frame_value(timestamp)
+        status = torch.zeros(1, 4, device=device, dtype=dtype)
+        if cur_pos is None or cur_timestamp is None:
+            return status
+
+        cur_pos = cur_pos.to(device=device, dtype=dtype)
+        cur_rot = cur_rot.to(device=device, dtype=dtype) if torch.is_tensor(cur_rot) else None
+        cur_timestamp = cur_timestamp.to(device=device, dtype=dtype).reshape(-1)[-1]
+        prev_pos = self.prev_frame_info.get('planning_prev_l2g_t', None)
+        prev_timestamp = self.prev_frame_info.get('planning_prev_timestamp', None)
+        prev_velocity = self.prev_frame_info.get('planning_prev_velocity', None)
+
+        velocity_global = torch.zeros_like(cur_pos)
+        velocity_valid = False
+        if not is_new_scene and prev_pos is not None and prev_timestamp is not None:
+            prev_pos = prev_pos.to(device=device, dtype=dtype)
+            prev_timestamp = prev_timestamp.to(device=device, dtype=dtype)
+            dt = torch.clamp(cur_timestamp - prev_timestamp, min=1e-3)
+            velocity_global = (cur_pos - prev_pos) / dt
+            velocity_valid = True
+            velocity = self._velocity_to_current_lidar(velocity_global, cur_rot)
+            status[0, :2] = velocity[:2]
+
+            if prev_velocity is not None:
+                prev_velocity = prev_velocity.to(device=device, dtype=dtype)
+                acceleration_global = (velocity_global - prev_velocity) / dt
+                acceleration = self._velocity_to_current_lidar(acceleration_global, cur_rot)
+                status[0, 2:] = acceleration[:2]
+
+        self.prev_frame_info['planning_prev_l2g_t'] = cur_pos.detach()
+        self.prev_frame_info['planning_prev_timestamp'] = cur_timestamp.detach()
+        self.prev_frame_info['planning_prev_velocity'] = velocity_global.detach() if velocity_valid else None
+        return status
         
 
     # Add the subtask loss to the whole model loss
@@ -246,6 +351,15 @@ class UniV2X(UniV2XTrack):
         
         # Forward Plan Head
         if self.with_planning_head:
+            outs_motion['planning_track_query_embeddings'] = outs_track.get('track_query_embeddings', None)
+            outs_motion['planning_sdc_embedding'] = outs_track.get('sdc_embedding', None)
+            outs_motion['planning_ego_status'] = self._build_train_ego_status(
+                l2g_t,
+                l2g_r_mat,
+                timestamp,
+                device=bev_embed.device,
+                dtype=bev_embed.dtype,
+            )
             outs_planning = self.planning_head.forward_train(bev_embed, outs_motion, sdc_planning, sdc_planning_mask, command, gt_future_boxes)
             losses_planning = outs_planning['losses']
             losses_planning = self.loss_weighted_and_prefixed(losses_planning, prefix='planning')
@@ -298,9 +412,13 @@ class UniV2X(UniV2XTrack):
                     name, type(var)))
         img = [img] if img is None else img
 
-        if img_metas[0][0]['scene_token'] != self.prev_frame_info['scene_token']:
+        is_new_scene = img_metas[0][0]['scene_token'] != self.prev_frame_info['scene_token']
+        if is_new_scene:
             # the first sample of each scene is truncated
             self.prev_frame_info['prev_bev'] = None
+            self.prev_frame_info['planning_prev_l2g_t'] = None
+            self.prev_frame_info['planning_prev_timestamp'] = None
+            self.prev_frame_info['planning_prev_velocity'] = None
         # update idx
         self.prev_frame_info['scene_token'] = img_metas[0][0]['scene_token']
 
@@ -312,7 +430,7 @@ class UniV2X(UniV2XTrack):
         tmp_pos = copy.deepcopy(img_metas[0][0]['can_bus'][:3])
         tmp_angle = copy.deepcopy(img_metas[0][0]['can_bus'][-1])
         # first frame
-        if self.prev_frame_info['scene_token'] is None:
+        if is_new_scene:
             img_metas[0][0]['can_bus'][:3] = 0
             img_metas[0][0]['can_bus'][-1] = 0
         # following frames
@@ -325,6 +443,14 @@ class UniV2X(UniV2XTrack):
         img = img[0]
         img_metas = img_metas[0]
         timestamp = timestamp[0] if timestamp is not None else None
+        planning_ego_status = self._build_test_ego_status(
+            l2g_t,
+            l2g_r_mat,
+            timestamp,
+            is_new_scene=is_new_scene,
+            device=img.device,
+            dtype=img.dtype,
+        )
 
         result = [dict() for i in range(len(img_metas))]
         result_track = self.simple_test_track(img, l2g_t, l2g_r_mat, img_metas, timestamp,
@@ -366,6 +492,9 @@ class UniV2X(UniV2XTrack):
             result[0]['occ'] = outs_occ
         
         if self.with_planning_head:
+            outs_motion['planning_track_query_embeddings'] = result_track[0].get('track_query_embeddings', None)
+            outs_motion['planning_sdc_embedding'] = result_track[0].get('sdc_embedding', None)
+            outs_motion['planning_ego_status'] = planning_ego_status.to(device=bev_embed.device, dtype=bev_embed.dtype)
             result_planning = self.planning_head.forward_test(bev_embed, outs_motion, outs_occ, command, drivable_pred)
             if w_label:
                 planning_gt=dict(
