@@ -88,9 +88,9 @@ occ_n_future = 4
 occ_n_future_plan = 10
 occ_n_future_max = max([occ_n_future, occ_n_future_plan])
 
-# ### planning ###
-# planning_steps = 10
-# use_col_optim = True
+### planning ###
+planning_steps = 10
+use_col_optim = True
 
 ### other settings ###
 train_gt_iou_threshold = 0.3
@@ -485,18 +485,18 @@ model_ego_agent = dict(
                 operation_order=('cross_attn', 'norm', 'ffn', 'norm')),
         ),
     ),
-    # planning_head=dict(
-    #     type='PlanningHeadSingleMode',
-    #     embed_dims=256,
-    #     planning_steps=planning_steps,
-    #     loss_planning=dict(type='PlanningLoss'),
-    #     loss_collision=[dict(type='CollisionLoss', delta=0.0, weight=2.5),
-    #                     dict(type='CollisionLoss', delta=0.5, weight=1.0),
-    #                     dict(type='CollisionLoss', delta=1.0, weight=0.25)],
-    #     use_col_optim=use_col_optim,
-    #     planning_eval=True,
-    #     with_adapter=True,
-    # ),
+    planning_head=dict(
+        type='PlanningHeadSingleMode',
+        embed_dims=256,
+        planning_steps=planning_steps,
+        loss_planning=dict(type='PlanningLoss'),
+        loss_collision=[dict(type='CollisionLoss', delta=0.0, weight=2.5),
+                        dict(type='CollisionLoss', delta=0.5, weight=1.0),
+                        dict(type='CollisionLoss', delta=1.0, weight=0.25)],
+        use_col_optim=use_col_optim,
+        planning_eval=True,
+        with_adapter=True,
+    ),
     # model training and testing settings
     train_cfg=dict(
         pts=dict(
@@ -592,10 +592,10 @@ train_pipeline = [
             # gt future bbox for plan	
             "gt_future_boxes",
             "gt_future_labels",
-            # # planning
-            # "sdc_planning",
-            # "sdc_planning_mask",
-            # "command",
+            # planning
+            "sdc_planning",
+            "sdc_planning_mask",
+            "command",
         ],
     ),
 ]
@@ -641,10 +641,10 @@ test_pipeline = [
                                             "gt_backward_flow",
                                             "gt_occ_has_invalid_frame",
                                             "gt_occ_img_is_valid",
-                                            # # planning
-                                            # "sdc_planning",
-                                            # "sdc_planning_mask",
-                                            # "command",
+                                            # planning
+                                            "sdc_planning",
+                                            "sdc_planning_mask",
+                                            "command",
                                         ]
             ),
         ],
@@ -676,7 +676,7 @@ data = dict(
         occ_receptive_field=3,
         occ_n_future=occ_n_future_max,
         occ_filter_invalid_sample=False,
-        # planning_steps=planning_steps,
+        planning_steps=planning_steps,
         # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
         # and box_type_3d='Depth' in sunrgbd and scannet dataset.
         box_type_3d="LiDAR",
@@ -707,7 +707,7 @@ data = dict(
         occ_receptive_field=3,
         occ_n_future=occ_n_future_max,
         occ_n_future_only_occ=occ_n_future,
-        # planning_steps=planning_steps,
+        planning_steps=planning_steps,
         occ_filter_invalid_sample=False,
         split_datas_file=split_datas_file,
         v2x_side=v2x_side,
@@ -729,7 +729,7 @@ data = dict(
         past_steps=past_steps,
         fut_steps=fut_steps,
         occ_n_future=occ_n_future_max,
-        # planning_steps=planning_steps,
+        planning_steps=planning_steps,
         use_nonlinear_optimizer=use_nonlinear_optimizer,
         classes=class_names,
         modality=input_modality,
